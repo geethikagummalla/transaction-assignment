@@ -1,131 +1,47 @@
-# 💳 Transaction Processing API (MVP)
+# Transaction Processing API MVP
 
-[![Java](https://img.shields.io/badge/Java-17%2B-ED8B00?style=for-the-badge&logo=openjdk&logoColor=white)](https://www.oracle.com/java/)
-[![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.3.0-6DB33F?style=for-the-badge&logo=spring-boot&logoColor=white)](https://spring.io/projects/spring-boot)
-[![Database](https://img.shields.io/badge/Database-H2_In--Memory-0078D7?style=for-the-badge&logo=h2&logoColor=white)](https://www.h2database.com/)
-[![Tests](https://img.shields.io/badge/Tests-JUnit_5_%7C_MockMvc-25A162?style=for-the-badge&logo=junit5&logoColor=white)](https://junit.org/junit5/)
-[![Build](https://img.shields.io/badge/Build-Maven_3.8%2B-C71A36?style=for-the-badge&logo=apache-maven&logoColor=white)](https://maven.apache.org/)
-
-A clean, production-grade Spring Boot 3 REST API for creating, managing, querying, and updating the lifecycle of customer financial transactions backed by an embedded H2 database.
+A clean, robust Spring Boot 3 REST API for processing and managing customer transactions backed by an in-memory H2 database.
 
 ---
 
-## 📑 Table of Contents
+## 1. Assumptions & Design Decisions
 
-- [Overview & Architecture](#-overview--architecture)
-- [Transaction State Machine](#-transaction-state-machine)
-- [Key Features](#-key-features)
-- [Data Model & Validation Rules](#-data-model--validation-rules)
-- [API Reference](#-api-reference)
-  - [1. Create Transaction](#1-create-transaction)
-  - [2. Get Transaction by ID](#2-get-transaction-by-id)
-  - [3. Update Transaction Status](#3-update-transaction-status)
-  - [4. Get Transactions by Customer ID](#4-get-transactions-by-customer-id)
-  - [5. Get All Transactions](#5-get-all-transactions)
-  - [Error Response Specification](#-error-response-specification)
-- [Getting Started](#-getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Build and Run](#build-and-run)
-  - [H2 Database Console](#h2-database-console)
-- [Testing & Quality Assurance](#-testing--quality-assurance)
-- [Project Directory Layout](#-project-directory-layout)
-- [Design Decisions & Assumptions](#-design-decisions--assumptions)
+1. **State Machine & Lifecycle**:
+   - New transactions always initialize with status `PENDING`.
+   - Permitted transitions:
+     - `PENDING` &rarr; `COMPLETED`
+     - `PENDING` &rarr; `FAILED`
+     - `PENDING` &rarr; `CANCELLED`
+   - Terminal statuses (`COMPLETED`, `FAILED`, `CANCELLED`) are immutable and cannot transition to any other status.
+2. **Idempotency & Uniqueness**:
+   - `transactionId` is the primary key and must be globally unique across transactions. Attempting to create an existing `transactionId` yields `HTTP 409 Conflict`.
+3. **Storage & Persistence**:
+   - Uses embedded H2 database (`jdbc:h2:mem:transactions;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE`) configured with JPA/Hibernate.
+4. **Error Handling**:
+   - Centralized `@RestControllerAdvice` translates domain exceptions and validation failures into standard structured error responses with appropriate HTTP status codes (`400`, `404`, `409`, `500`).
 
 ---
 
-## 🏗 Overview & Architecture
+## 2. Validation Rules
 
-The service follows a clean layered architecture adhering to **SOLID principles**, strict domain separation, and standardized REST conventions:
-
-```
-                  ┌───────────────────────────────┐
-                  │    HTTP Client / Frontend     │
-                  └───────────────┬───────────────┘
-                                  │ JSON / REST
-                                  ▼
-                  ┌───────────────────────────────┐
-                  │      TransactionController    │  ◄── DTO & JSR-380 Validation
-                  └───────────────┬───────────────┘
-                                  │
-                                  ▼
-                  ┌───────────────────────────────┐
-                  │      TransactionService       │  ◄── Business Logic & State Machine
-                  └───────────────┬───────────────┘
-                                  │
-                                  ▼
-                  ┌───────────────────────────────┐
-                  │     TransactionRepository     │  ◄── Spring Data JPA
-                  └───────────────┬───────────────┘
-                                  │
-                                  ▼
-                  ┌───────────────────────────────┐
-                  │     H2 In-Memory Database     │
-                  └───────────────────────────────┘
-```
+| Field | Type | Validation Rules |
+| :--- | :--- | :--- |
+| `transactionId` | String | Required (non-blank), unique primary key. Must not equal `customerId`. |
+| `customerId` | String | Required (non-blank). |
+| `amount` | BigDecimal | Required (non-null), positive (`> 0.00`), max 2 decimal places, max limit `1,000,000.00`. |
+| `currency` | String | Required (non-blank). Allowed: `USD`, `EUR`, `GBP`, `CAD`, `JPY`, `INR` (case-insensitive). |
+| `transactionType` | String | Required (non-blank). Allowed: `PAYMENT`, `REFUND`, `TRANSFER`, `DEPOSIT`, `WITHDRAWAL`. |
+| `status` | String | Initialized as `PENDING`. If supplied in creation request, must be `PENDING` (otherwise `400 Bad Request`). |
 
 ---
 
-## 🔄 Transaction State Machine
+## 3. API Reference
 
-Transactions strictly obey a forward-only finite state machine (FSM). Terminal states are immutable.
+### Base URL: `/api/transactions`
 
-```mermaid
-stateDiagram-v2
-    [*] --> PENDING : Transaction Created (POST)
-    PENDING --> COMPLETED : Status Update (PATCH/PUT)
-    PENDING --> FAILED : Status Update (PATCH/PUT)
-    PENDING --> CANCELLED : Status Update (PATCH/PUT)
-
-    COMPLETED --> [*] : Terminal State (Immutable)
-    FAILED --> [*] : Terminal State (Immutable)
-    CANCELLED --> [*] : Terminal State (Immutable)
-
-    note right of COMPLETED
-      Attempting to change status of COMPLETED,
-      FAILED, or CANCELLED returns 400 Bad Request.
-    end note
-```
-
----
-
-## ✨ Key Features
-
-- 🛡️ **Defensive Validation**: Strict request constraints (positive amounts with up to 2 decimal places, supported currency list, valid transaction types).
-- 🔒 **Lifecycle & State Guarding**: Transitions only permitted from `PENDING` to terminal states (`COMPLETED`, `FAILED`, `CANCELLED`).
-- ⚡ **Idempotency & Conflict Handling**: Duplicate `transactionId` submissions are detected and return `HTTP 409 Conflict`.
-- 🩺 **Centralized Exception Handling**: `@RestControllerAdvice` ensures consistent error contracts across validation errors, domain faults, and unexpected server failures.
-- 🗄️ **Zero-Configuration Persistence**: In-memory H2 database with embedded console access for testing and inspection.
-- 🧪 **100% Core Test Coverage**: Unit and MockMvc integration tests verifying all edge cases, validations, and state transitions.
-
----
-
-## 📋 Data Model & Validation Rules
-
-| Field | Type | Required | Constraints / Rules | Allowed Values |
-| :--- | :--- | :---: | :--- | :--- |
-| `transactionId` | `String` | **Yes** | Non-blank, unique primary key, cannot match `customerId` | e.g. `"TXN-1001"` |
-| `customerId` | `String` | **Yes** | Non-blank identifier for the customer | e.g. `"CUST-501"` |
-| `amount` | `BigDecimal` | **Yes** | Positive (`> 0.00`), max 2 decimal places, max `1,000,000.00` | e.g. `150.75` |
-| `currency` | `String` | **Yes** | Non-blank, standard 3-letter currency code (case-insensitive) | `USD`, `EUR`, `GBP`, `CAD`, `JPY`, `INR` |
-| `transactionType` | `String` | **Yes** | Non-blank transaction classification | `PAYMENT`, `REFUND`, `TRANSFER`, `DEPOSIT`, `WITHDRAWAL` |
-| `status` | `String` | Optional on creation | Defaults to `PENDING`. If supplied on create, must be `PENDING`. | `PENDING`, `COMPLETED`, `FAILED`, `CANCELLED` |
-
----
-
-## 📡 API Reference
-
-**Base URL**: `http://localhost:8080/api/transactions`
-
----
-
-### 1. Create Transaction
-
-Initializes a new transaction in `PENDING` status.
-
-- **URL**: `POST /api/transactions`
-- **Headers**: `Content-Type: application/json`
-
-#### Request Body
+#### 1. Create Transaction
+- **Method**: `POST /api/transactions`
+- **Request Body**:
 ```json
 {
   "transactionId": "TXN-1001",
@@ -135,8 +51,7 @@ Initializes a new transaction in `PENDING` status.
   "transactionType": "PAYMENT"
 }
 ```
-
-#### Response: `201 Created`
+- **Response**: `201 Created`
 ```json
 {
   "transactionId": "TXN-1001",
@@ -148,28 +63,11 @@ Initializes a new transaction in `PENDING` status.
 }
 ```
 
-#### cURL Example
-```bash
-curl -X POST http://localhost:8080/api/transactions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "transactionId": "TXN-1001",
-    "customerId": "CUST-501",
-    "amount": 150.75,
-    "currency": "USD",
-    "transactionType": "PAYMENT"
-  }'
-```
-
 ---
 
-### 2. Get Transaction by ID
-
-Retrieves details for a single transaction by its unique identifier.
-
-- **URL**: `GET /api/transactions/{transactionId}`
-
-#### Response: `200 OK`
+#### 2. Get Transaction by ID
+- **Method**: `GET /api/transactions/{transactionId}`
+- **Response**: `200 OK`
 ```json
 {
   "transactionId": "TXN-1001",
@@ -180,29 +78,19 @@ Retrieves details for a single transaction by its unique identifier.
   "status": "PENDING"
 }
 ```
-
-#### cURL Example
-```bash
-curl -X GET http://localhost:8080/api/transactions/TXN-1001
-```
+- **Error**: `404 Not Found` if the transaction does not exist.
 
 ---
 
-### 3. Update Transaction Status
-
-Transitions a `PENDING` transaction to `COMPLETED`, `FAILED`, or `CANCELLED`.
-
-- **URL**: `PATCH /api/transactions/{transactionId}/status` *(or `PUT`)*
-- **Headers**: `Content-Type: application/json`
-
-#### Request Body
+#### 3. Update Transaction Status
+- **Method**: `PATCH /api/transactions/{transactionId}/status` (or `PUT /api/transactions/{transactionId}/status`)
+- **Request Body**:
 ```json
 {
   "status": "COMPLETED"
 }
 ```
-
-#### Response: `200 OK`
+- **Response**: `200 OK`
 ```json
 {
   "transactionId": "TXN-1001",
@@ -213,58 +101,15 @@ Transitions a `PENDING` transaction to `COMPLETED`, `FAILED`, or `CANCELLED`.
   "status": "COMPLETED"
 }
 ```
-
-#### cURL Example
-```bash
-curl -X PATCH http://localhost:8080/api/transactions/TXN-1001/status \
-  -H "Content-Type: application/json" \
-  -d '{"status": "COMPLETED"}'
-```
+- **Error Codes**:
+  - `400 Bad Request`: Invalid transition (e.g. updating a terminal status) or invalid status value.
+  - `404 Not Found`: Transaction does not exist.
 
 ---
 
-### 4. Get Transactions by Customer ID
-
-Retrieves all transactions associated with a given customer.
-
-- **URL**: `GET /api/transactions?customerId={customerId}` *(or `GET /api/transactions/customer/{customerId}`)*
-
-#### Response: `200 OK`
-```json
-[
-  {
-    "transactionId": "TXN-1001",
-    "customerId": "CUST-501",
-    "amount": 150.75,
-    "currency": "USD",
-    "transactionType": "PAYMENT",
-    "status": "COMPLETED"
-  },
-  {
-    "transactionId": "TXN-1002",
-    "customerId": "CUST-501",
-    "amount": 50.00,
-    "currency": "USD",
-    "transactionType": "REFUND",
-    "status": "PENDING"
-  }
-]
-```
-
-#### cURL Example
-```bash
-curl -X GET "http://localhost:8080/api/transactions?customerId=CUST-501"
-```
-
----
-
-### 5. Get All Transactions
-
-Retrieves all transactions stored in the system.
-
-- **URL**: `GET /api/transactions`
-
-#### Response: `200 OK`
+#### 4. Get Transactions by Customer ID
+- **Method**: `GET /api/transactions?customerId={customerId}` or `GET /api/transactions/customer/{customerId}`
+- **Response**: `200 OK`
 ```json
 [
   {
@@ -280,167 +125,82 @@ Retrieves all transactions stored in the system.
 
 ---
 
-### 🚨 Error Response Specification
-
-When an error occurs, the API returns a structured JSON payload:
-
-```json
-{
-  "status": 400,
-  "error": "Bad Request",
-  "message": "Transaction amount must have at most 2 decimal places.",
-  "timestamp": "2026-08-27T11:20:00.123456"
-}
-```
-
-| HTTP Status | Error Type | Scenario |
-| :--- | :--- | :--- |
-| `400 Bad Request` | `Validation Exception` | Missing required fields, negative amount, >2 decimal places, unsupported currency/type |
-| `400 Bad Request` | `InvalidStatusTransitionException` | Attempting to transition from `COMPLETED`, `FAILED`, or `CANCELLED` |
-| `404 Not Found` | `TransactionNotFoundException` | Specified `transactionId` does not exist |
-| `409 Conflict` | `DuplicateTransactionException` | `transactionId` already exists in database |
-| `500 Internal Server Error` | `Internal Server Error` | Unhandled server exception |
-
----
-
-## 🚀 Getting Started
-
-### Prerequisites
-
-- **Java JDK**: Version 17 or higher
-- **Maven**: Version 3.8+ (or use the included Maven wrapper `./mvnw` / `.\mvnw.cmd`)
-
-### Build and Run
-
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/181315/transaction-assignment.git
-   cd transaction-assignment
-   ```
-
-2. **Run using Maven Wrapper**:
-
-   - **Windows (PowerShell / Command Prompt)**:
-     ```cmd
-     .\mvnw.cmd spring-boot:run
-     ```
-
-   - **Linux / macOS**:
-     ```bash
-     ./mvnw spring-boot:run
-     ```
-
-3. The application will start on **`http://localhost:8080`**.
-
----
-
-### 🗄️ H2 Database Console
-
-The embedded H2 database console is enabled for easy inspection during development:
-
-- **URL**: [http://localhost:8080/h2-console](http://localhost:8080/h2-console)
-- **Driver Class**: `org.h2.Driver`
-- **JDBC URL**: `jdbc:h2:mem:transactions;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE`
-- **User Name**: `sa`
-- **Password**: *(leave blank)*
-
----
-
-## 🧪 Testing & Quality Assurance
+## 4. Testing & Verification
 
 ### Running the Test Suite
 
-Execute the full automated test suite using Maven:
+#### Windows
+```cmd
+.\mvnw.cmd clean test
+```
 
-- **Windows**:
-  ```cmd
-  .\mvnw.cmd clean test
-  ```
+#### Linux / macOS
+```bash
+./mvnw clean test
+```
 
-- **Linux / macOS**:
-  ```bash
-  ./mvnw clean test
-  ```
-
-### Test Suite Highlights (`TransactionControllerTest`)
-
-- ✅ **Creation**: Verify 201 Created and default `PENDING` status.
-- ✅ **Validation Boundaries**:
-  - Null / blank fields (`400 Bad Request`)
-  - Zero / negative amounts (`400 Bad Request`)
-  - Amounts exceeding 2 decimal places (`400 Bad Request`)
-  - Unsupported currency codes and transaction types (`400 Bad Request`)
-  - Supplying non-pending status during creation (`400 Bad Request`)
-- ✅ **Uniqueness & Idempotency**: Duplicate `transactionId` triggers `409 Conflict`.
-- ✅ **404 Not Found**: Non-existent ID lookup and status updates return `404 Not Found`.
-- ✅ **State Transitions**:
-  - `PENDING` &rarr; `COMPLETED`, `FAILED`, `CANCELLED` (`200 OK`)
-  - Terminal status immutability `COMPLETED` &rarr; `CANCELLED` (`400 Bad Request`)
-- ✅ **Customer Filtering**: Querying by `customerId` query parameter and path variable.
-- ✅ **Starter Compatibility**: Verified `GET /api/sample` remains functional.
+### Test Coverage Highlights
+- **Successful Creation**: Validates 201 Created and default `PENDING` status.
+- **Validation Rejections**:
+  - Blank required fields (`400 Bad Request`)
+  - Negative/zero amounts and amounts with >2 decimal places (`400 Bad Request`)
+  - Unsupported currencies and transaction types (`400 Bad Request`)
+  - Non-pending initial creation status (`400 Bad Request`)
+- **Conflict Handling**: Duplicate transaction IDs return `409 Conflict`.
+- **404 Handling**: Non-existent transaction lookups and updates return `404 Not Found`.
+- **Status Transitions**:
+  - Valid transitions: `PENDING` &rarr; `COMPLETED`, `FAILED`, `CANCELLED` (`200 OK`)
+  - Invalid transitions: Attempting to modify terminal status `COMPLETED` &rarr; `CANCELLED` (`400 Bad Request`)
+- **Customer Lookup**: Verifies filtering transactions by customer ID.
+- **Backward Compatibility**: Verifies starter endpoint `GET /api/sample` remains functional.
 
 ---
 
-## 📁 Project Directory Layout
+## 5. Limitations & Future Improvements
+
+1. **Pagination & Sorting**: Currently customer transaction lookups return the full list. Adding Spring Data `Pageable` support (`page`, `size`, `sort`) would optimize large transaction histories.
+2. **Audit Logging & Timestamping**: Add `createdAt` and `updatedAt` audit columns (`@CreatedDate`, `@LastModifiedDate`).
+3. **Distributed Locking / Optimistic Locking**: Add `@Version` field to `Transaction` entity to handle concurrent status update race conditions in high-throughput environments.
+4. **Persistent RDBMS**: Swap in PostgreSQL or MySQL profile for production environments with migration tools like Flyway / Liquibase.
+5. **API Documentation**: Add OpenAPI / Swagger UI contract specification for external consumers.
+
+---
+
+## 6. Test Run Output
+
+All 16 tests executed via `./mvnw clean test` (or `.\mvnw.cmd clean test`) pass with `0` failures and `0` errors. The full console output is also preserved in [TEST_RUN_OUTPUT.txt](TEST_RUN_OUTPUT.txt).
 
 ```
-transaction-assignment/
-├── .gitignore
-├── pom.xml
-├── README.md
-├── STUDENT_CHECKLIST.md
-├── mvnw
-├── mvnw.cmd
-└── src/
-    ├── main/
-    │   ├── java/com/example/transactionstarter/
-    │   │   ├── TransactionStarterApplication.java
-    │   │   ├── controller/
-    │   │   │   ├── TransactionController.java
-    │   │   │   └── sample/SampleController.java
-    │   │   ├── dto/
-    │   │   │   ├── CreateTransactionRequest.java
-    │   │   │   ├── UpdateTransactionStatusRequest.java
-    │   │   │   ├── TransactionResponse.java
-    │   │   │   └── ErrorResponse.java
-    │   │   ├── exception/
-    │   │   │   ├── GlobalExceptionHandler.java
-    │   │   │   ├── DuplicateTransactionException.java
-    │   │   │   ├── InvalidStatusTransitionException.java
-    │   │   │   ├── InvalidTransactionException.java
-    │   │   │   └── TransactionNotFoundException.java
-    │   │   ├── model/
-    │   │   │   ├── Transaction.java
-    │   │   │   └── TransactionStatus.java
-    │   │   ├── repository/
-    │   │   │   └── TransactionRepository.java
-    │   │   └── service/
-    │   │       └── TransactionService.java
-    │   └── resources/
-    │       └── application.yml
-    └── test/
-        └── java/com/example/transactionstarter/
-            ├── TransactionStarterApplicationTests.java
-            └── controller/
-                └── TransactionControllerTest.java
+-------------------------------------------------------
+ T E S T S
+-------------------------------------------------------
+Running com.example.transactionstarter.controller.TransactionControllerTest
+Started TransactionControllerTest in 4.472 seconds
+Tests run: 15, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 6.910 s -- in com.example.transactionstarter.controller.TransactionControllerTest
+
+Running com.example.transactionstarter.TransactionStarterApplicationTests
+Started TransactionStarterApplicationTests in 0.471 seconds
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.481 s -- in com.example.transactionstarter.TransactionStarterApplicationTests
+
+Results:
+
+Tests run: 16, Failures: 0, Errors: 0, Skipped: 0
+
+------------------------------------------------------------------------
+BUILD SUCCESS
+------------------------------------------------------------------------
+Total time:  11.911 s
+Finished at: 2026-09-02T11:52:56+05:30
+------------------------------------------------------------------------
 ```
 
 ---
 
-## 💡 Design Decisions & Assumptions
+## 7. AI Usage Disclosure
 
-1. **State Machine Immutability**:
-   Once a transaction reaches a terminal state (`COMPLETED`, `FAILED`, `CANCELLED`), it can never be altered. This prevents accidental status corruption in payment workflows.
+In compliance with the candidate submission guidelines, AI assistance (Google Antigravity / Gemini) was utilized during the development of this project. For full transparency, see [AI_USAGE_DISCLOSURE.md](AI_USAGE_DISCLOSURE.md).
 
-2. **Idempotency & Primary Key**:
-   `transactionId` is used as the database `@Id`. Any attempt to insert an existing ID throws `DuplicateTransactionException` which maps cleanly to `HTTP 409 Conflict`.
+- **Architectural & Design Brainstorming**: Consulted AI to evaluate Finite State Machine (FSM) representation inside enum vs external workflow engines, and verified `BigDecimal` precision practices.
+- **Code & Test Scaffolding**: Assisted in generating repetitive boilerplate (DTOs, error mappings) and formulating comprehensive `MockMvc` edge case test cases.
+- **Human Verification & Ownership**: All code, business rules, and tests were critically inspected, refined, compiled, and verified locally by the candidate. The candidate holds full comprehension of every class, method, and architectural decision.
 
-3. **Monetary Precision**:
-   Amounts are represented using `BigDecimal` rather than floating-point types (`double`/`float`) to prevent floating-point rounding inaccuracies.
-
-4. **Future Roadmap**:
-   - **Pagination & Sorting**: Add Spring Data `Pageable` (`page`, `size`, `sort`) for customer transaction lookups.
-   - **Audit Timestamps**: Add `@CreatedDate` and `@LastModifiedDate` with JPA Auditing.
-   - **Concurrency Control**: Add `@Version` optimistic locking to avoid race conditions during concurrent status updates.
-   - **Production DB**: Configure PostgreSQL / MySQL profile alongside Flyway migrations.
-   - **OpenAPI Docs**: Add SpringDoc Swagger UI integration.
